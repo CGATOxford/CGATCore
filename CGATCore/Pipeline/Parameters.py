@@ -6,51 +6,39 @@ Reference
 
 """
 
-import re
+import types
 import collections
 import os
-
-import configparser
-
 import sys
+import platform
+import configparser
+import getpass
+import logging
+import yaml
+import re
+from collections import defaultdict
 
 import CGATCore.Experiment as E
 import CGATCore.IOTools as IOTools
-
-from CGATCore.Pipeline.Utils import getCallerLocals, isTest
+from CGATCore.Pipeline.Utils import get_caller_locals, is_test
 
 # sort out script paths
 
-# root directory of CGAT Code collection
-CGATSCRIPTS_ROOT_DIR = os.path.dirname(
+# root directory of code
+SCRIPTS_ROOT_DIR = os.path.dirname(
     os.path.dirname(E.__file__))
 
-# CGAT Code collection scripts
-CGATSCRIPTS_SCRIPTS_DIR = os.path.join(CGATSCRIPTS_ROOT_DIR, "CGAT", "scripts")
-
-# root directory of CGAT Pipelines
-CGATPIPELINES_ROOT_DIR = os.path.dirname(os.path.dirname(
-    os.path.dirname(__file__)))
-
-# CGAT Pipeline scripts
-CGATPIPELINES_SCRIPTS_DIR = os.path.join(CGATPIPELINES_ROOT_DIR,
-                                         "scripts")
-# Directory of CGAT pipelines
-CGATPIPELINES_PIPELINE_DIR = os.path.join(CGATPIPELINES_ROOT_DIR,
-                                          "CGATPipelines")
-# CGAT Pipeline R scripts
-CGATPIPELINES_R_DIR = os.path.join(CGATPIPELINES_ROOT_DIR, "R")
+# script directory
+SCRIPTS_SCRIPTS_DIR = os.path.join(SCRIPTS_ROOT_DIR, "scripts")
 
 # if Pipeline.py is called from an installed version, scripts are
 # located in the "bin" directory.
-if not os.path.exists(CGATSCRIPTS_SCRIPTS_DIR):
+if not os.path.exists(SCRIPTS_SCRIPTS_DIR):
     SCRIPTS_DIR = os.path.join(sys.exec_prefix, "bin")
 
-if not os.path.exists(CGATPIPELINES_SCRIPTS_DIR):
-    PIPELINE_SCRIPTS_DIR = os.path.join(sys.exec_prefix, "bin")
 
-# Global variable for configuration file data
-CONFIG = configparser.SafeConfigParser()
+def get_logger():
+    return logging.getLogger("CGATCore.pipeline")
 
 
 class TriggeredDefaultFactory:
@@ -62,99 +50,73 @@ class TriggeredDefaultFactory:
         else:
             raise KeyError("missing parameter accessed")
 
+
 # Global variable for parameter interpolation in commands
 # This is a dictionary that can be switched between defaultdict
 # and normal dict behaviour.
-PARAMS = collections.defaultdict(TriggeredDefaultFactory())
+PARAMS = defaultdict(TriggeredDefaultFactory())
 
 # patch - if --help or -h in command line arguments,
 # switch to a default dict to avoid missing paramater
 # failures
-if isTest() or "--help" in sys.argv or "-h" in sys.argv:
+if is_test() or "--help" in sys.argv or "-h" in sys.argv:
     TriggeredDefaultFactory.with_default = True
 
-# A list of hard-coded parameters within the CGAT environment
-# These can be overwritten by command line options and
-# configuration files
+# A list of hard-coded parameters for fall-back. These should be
+# overwritten by command line options and configuration files.
 HARDCODED_PARAMS = {
-    'scriptsdir': CGATSCRIPTS_SCRIPTS_DIR,
-    'toolsdir': CGATSCRIPTS_SCRIPTS_DIR,
-    'pipeline_scriptsdir': CGATPIPELINES_SCRIPTS_DIR,
-    'pipelinedir': CGATPIPELINES_PIPELINE_DIR,
-    'pipeline_rdir': CGATPIPELINES_R_DIR,
-    # script to perform map/reduce like computation.
-    'cmd-farm': """python %(pipeline_scriptsdir)s/farm.py
-                --method=drmaa
-                --bashrc=%(pipeline_scriptsdir)s/bashrc.cgat
-                --cluster-options=%(cluster_options)s
-                --cluster-queue=%(cluster_queue)s
-                --cluster-num-jobs=%(cluster_num_jobs)i
-                --cluster-priority=%(cluster_priority)i
-                --cluster-queue-manager=%(cluster_queue_manager)s
-                --cluster-memory-resource=%(cluster_memory_resource)s
-                --cluster-memory-default=%(cluster_memory_default)s
-    """,
-    # command to get tab-separated output from database
-    'cmd-sql': """sqlite3 -header -csv -separator $'\\t' """,
-    # DEPRECATED: options to use for csv2db upload
-    "csv2db_options": "--backend=sqlite --retry --map=gene_id:str "
-    "--map=contig:str --map=transcript_id:str",
-    # database backend
-    'database_backend': "sqlite",
-    # database host
-    'database_host': "",
-    # name of database
-    'database_name': "csvdb",
-    # database connection options
-    'database_username': "cgat",
-    # database password - if required
-    'database_password': "",
-    # database port - if required
-    'database_port': 3306,
-    # wrapper around non-CGAT scripts
-    'cmd-run': """%(pipeline_scriptsdir)s/run.py""",
-    # legacy directory used for temporary local files
-    #     Use of this var can be problematic (issue #174)
-    #     - it may be depreciated.
-    'tmpdir': os.environ.get("TMPDIR", '/scratch'),
-    # directory used for temporary local tempory files on compute nodes
-    # *** passed directly to the shell      ***
-    # *** may not exist on login/head nodes ***
-    # default matches 'tmpdir' only for backwards compatibility
-    # typically a shell environment var is expected, e.g.
-    # 'local_tmpdir': '$SCRATCH_DIR',
-    'local_tmpdir': os.environ.get("TMPDIR", '/scratch'),
+    'scriptsdir': SCRIPTS_SCRIPTS_DIR,
+    'toolsdir': SCRIPTS_SCRIPTS_DIR,
+    # directory used for temporary local files
+    # on the submission node
+    'tmpdir': os.environ.get("TMPDIR",
+                             os.path.join("/tmp", getpass.getuser())),
     # directory used for temporary files shared across machines
-    'shared_tmpdir': os.environ.get("SHARED_TMPDIR", "/ifs/scratch"),
-    # queue manager (supported: sge, slurm, torque, pbspro)
-    'cluster_queue_manager': 'sge',
-    # cluster queue to use
-    'cluster_queue': 'all.q',
-    # priority of jobs in cluster queue
-    'cluster_priority': -10,
-    # number of jobs to submit to cluster queue
-    'cluster_num_jobs': 100,
-    # name of consumable resource to use for requesting memory
-    'cluster_memory_resource': "mem_free",
-    # amount of memory set by default for each job
-    'cluster_memory_default': "2G",
-    # general cluster options
-    'cluster_options': "",
-    # parallel environment to use for multi-threaded jobs
-    'cluster_parallel_environment': 'dedicated',
+    'shared_tmpdir': os.environ.get("SHARED_TMPDIR", os.path.abspath(os.getcwd())),
+    # database backend
+    'database': {'url': 'sqlite:///./csvdb'},
+    # cluster options - parameterized for CGAT cluster for testing
+    'cluster': {
+        # cluster queue to use
+        'queue': 'all.q',
+        # priority of jobs in cluster queue
+        'priority': -10,
+        # number of jobs to submit to cluster queue
+        'num_jobs': 100,
+        # name of consumable resource to use for requesting memory
+        'memory_resource': "mem_free",
+        # amount of memory set by default for each job
+        'memory_default': "4G",
+        # ensure requested memory is not exceeded via ulimit (this is
+        # not compatible with and/or needed  for all cluster configurations)
+        'memory_ulimit': True,
+        # general cluster options
+        'options': "",
+        # parallel environment to use for multi-threaded jobs
+        'parallel_environment': 'dedicated',
+        # the cluster queue manager
+        'queue_manager': "sge",
+        # directory specification for temporary files on cluster nodes,
+        # useful for passing the name of a non-standard environment variable
+        # which will be set by the queue manager e.g. in a prolog script
+        # if set to False, the general "tmpdir" parameter is used.
+        'tmpdir': False
+    },
     # ruffus job limits for databases
     'jobs_limit_db': 10,
     # ruffus job limits for R
     'jobs_limit_R': 1,
+    # operating system we are running on
+    'os': platform.system(),
 }
 
 # After all configuration files have been read, some
 # parameters need to be interpolated with other parameters
 # The list is below:
-INTERPOLATE_PARAMS = ('cmd-farm', 'cmd-run')
+INTERPOLATE_PARAMS = []
 
 
-def configToDictionary(config):
+def config_to_dictionary(config):
     """convert the contents of a :py:class:`ConfigParser.ConfigParser`
     object to a dictionary
 
@@ -184,7 +146,7 @@ def configToDictionary(config):
         A dictionary of configuration values
 
     """
-    p = {}
+    p = defaultdict(lambda: defaultdict(TriggeredDefaultFactory()))
     for section in config.sections():
         for key, value in config.items(section):
             try:
@@ -196,6 +158,15 @@ def configToDictionary(config):
                 raise
 
             p["%s_%s" % (section, key)] = v
+
+            # IMS: new heirarchical format
+            try:
+                p[section][key] = v
+            except TypeError:
+                # fails with things like genome_dir=abc
+                # if [genome] does not exist.
+                continue
+
             if section in ("general", "DEFAULT"):
                 p["%s" % (key)] = v
 
@@ -205,7 +176,20 @@ def configToDictionary(config):
     return p
 
 
-def inputValidation(PARAMS, pipeline_script=""):
+def nested_update(old, new):
+    '''Update potentially nested dictionaries. If both old[x] and new[x]
+    inherit from collections.Mapping, then update old[x] with entries from
+    new[x], otherwise set old[x] to new[x]'''
+
+    for key, value in new.items():
+        if isinstance(value, collections.Mapping) and \
+           isinstance(old.get(key, str()), collections.Mapping):
+            old[key].update(new[key])
+        else:
+            old[key] = new[key]
+
+
+def input_validation(PARAMS, pipeline_script=""):
     '''Inspects the PARAMS dictionary looking for problematic input values.
 
     So far we just check that:
@@ -221,10 +205,10 @@ def inputValidation(PARAMS, pipeline_script=""):
           is readable
     '''
 
-    E.info('''=== Input Validation starts ===''')
-    E.info(''' Checking 3rd party dependencies ''')
+    E.info('''input Validation starting''')
+    E.info('''checking 3rd party dependencies''')
 
-    ### check 3rd party dependencies ###
+    # check 3rd party dependencies
     if len(pipeline_script) > 0:
         # this import requires the PYTHONPATH in the following order
         # PYTHONPATH=<src>/CGATPipelines:<src>/cgat
@@ -232,134 +216,57 @@ def inputValidation(PARAMS, pipeline_script=""):
         deps, check_path_failures = cd.checkDepedencies(pipeline_script)
         # print info about dependencies
         if len(deps) == 0:
-            print('\nNo dependencies found.\n')
+            E.info('no dependencies found')
         else:
-        # print dictionary ordered by value
+            # print dictionary ordered by value
             for k in sorted(deps, key=deps.get, reverse=True):
-                print('\nProgram: {0!s} used {1} time(s)'.format(k, deps[k]))
-
+                E.info('Program: {0!s} used {1} time(s)'.format(k, deps[k]))
             n_failures = len(check_path_failures)
             if n_failures == 0:
-                print('\nCongratulations! All required programs are available on your PATH\n')
+                E.info('All required programs are available on your PATH')
             else:
-                print('\nThe following programs are not on your PATH')
+                E.info('The following programs are not on your PATH')
                 for p in check_path_failures:
-                    print('\n{0!s}'.format(p))
-                print
+                    E.info('{0!s}'.format(p))
 
-    ## check PARAMS
+    # check PARAMS
     num_missing = 0
     num_questions = 0
 
-    E.info(''' Checking pipeline configuration ''')
+    E.info('''checking pipeline configuration''')
 
     for key, value in sorted(PARAMS.iteritems()):
 
-        key   = str(key)
+        key = str(key)
         value = str(value)
 
         # check for missing values
         if value == "":
-            print('\n"{}" is empty, is that expected?'.format(key))
+            E.warn('\n"{}" is empty, is that expected?'.format(key))
             num_missing += 1
 
         # check for a question mark in the dictironary (indicates
         # that there is a missing input parameter)
         if "?" in value:
-            print('\n"{}" is not defined (?), is that expected?'.format(key))
+            E.warn('\n"{}" is not defined (?), is that expected?'.format(key))
             num_questions += 1
 
         # validate input files listed in PARAMS
-        if (value.startswith("/") \
-           or value.endswith(".gz") \
-           or value.endswith(".gtf")) \
-           and "," not in value:
+        if (value.startswith("/") or value.endswith(".gz") or value.endswith(".gtf")) and "," not in value:
+            if not os.access(value, os.R_OK):
+                E.warn('\n"{}": "{}" is not readable'.format(key, value))
 
-            if os.access(value, os.R_OK):
-                pass
-            else:
-                print('\n"{}": "{}" is not readable'.format(key, value))
-
-    if num_missing == 0 and num_questions == 0:
-        while True:
-            confirmation = raw_input('''
-            ##########################################################
-
-            Your input data seems all correct, congratulations!
-
-            Do you want to continue running the pipeline? (y/n)
-
-            ##########################################################
-
-            ''')
-            if confirmation.lower() == "y":
-                E.info('=== Input Validation ends ===')
-                break
-            elif confirmation.lower() == "n":
-                E.info('=== Input Validation ends ===')
-                E.info('Pipeline aborted.')
-                sys.exit(0)
-    else:
-        while True:
-            start_pipeline = raw_input('''
-            ###########################################################
-
-            Please check the WARNING messages and if you are
-            happy then enter "y" to continue or "n" to abort running
-            the pipeline.
-
-            ###########################################################
-            ''')
-            if start_pipeline.lower() == "y":
-                E.info('=== Input Validation ends ===')
-                break
-            if start_pipeline.lower() == "n":
-                E.info('=== Input Validation ends ===')
-                E.info('Pipeline aborted.')
-                sys.exit(0)
+    if num_missing or num_questions:
+        raise ValueError("pipeline has configuration issues")
 
 
-def getParameters(filenames=["pipeline.ini", ],
-                  defaults=None,
-                  site_ini=True,
-                  user_ini=True,
-                  default_ini=True,
-                  only_import=None):
-    '''read a config file and return as a dictionary.
-
-    Sections and keys are combined with an underscore. If a key
-    without section does not exist, it will be added plain.
-
-    For example::
-
-       [general]
-       input=input1.file
-
-       [special]
-       input=input2.file
-
-    will be entered as { 'general_input' : "input1.file",
-    'input: "input1.file", 'special_input' : "input2.file" }
-
-    This function also updates the module-wide parameter map.
-
-    The section [DEFAULT] is equivalent to [general].
-
-    The order of initialization is as follows:
-
-    1. hard-coded defaults
-    2. pipeline specific default file in the CGAT code installation
-    3. :file:`.cgat` in the users home directory
-    4. files supplied by the user in the order given
-
-    If the same configuration value appears in multiple
-    files, later configuration files will overwrite the
-    settings form earlier files.
-
-    Path names are expanded to the absolute pathname to avoid
-    ambiguity with relative path names. Path names are updated
-    for parameters that end in the suffix "dir" and start with
-    a "." such as "." or "../data".
+def get_parameters(filenames=None,
+                   defaults=None,
+                   site_ini=True,
+                   user=True,
+                   only_import=None):
+    '''read one or more config files and build global PARAMS configuration
+    dictionary.
 
     Arguments
     ---------
@@ -369,17 +276,15 @@ def getParameters(filenames=["pipeline.ini", ],
        Dictionary with default values. These will be overwrite
        any hard-coded parameters, but will be overwritten by user
        specified parameters in the configuration files.
-    default_ini : bool
-       If set, the default initialization file will be read from
-       'CGATPipelines/configuration/pipeline.ini'
-    user_ini : bool
+    user : bool
        If set, configuration files will also be read from a
-       file called :file:`.cgat` in the user`s home directory.
+       file called :file:`.daisy.yml` in the user`s
+       home directory.
     only_import : bool
        If set to a boolean, the parameter dictionary will be a
        defaultcollection. This is useful for pipelines that are
        imported (for example for documentation generation) but not
-       executed as there might not be an appropriate .ini file
+       executed as there might not be an appropriate .yml file
        available. If `only_import` is None, it will be set to the
        default, which is to raise an exception unless the calling
        script is imported or the option ``--is-test`` has been passed
@@ -387,21 +292,24 @@ def getParameters(filenames=["pipeline.ini", ],
 
     Returns
     -------
-    config : dict
-       Dictionary with configuration values.
+    params : dict
+       Global configuration dictionary.
     '''
+    if filenames is None:
+        filenames = ["pipeline.yml"]
 
-    global CONFIG
+    if isinstance(filenames, str):
+        filenames = [filenames]
+
     global PARAMS
     old_id = id(PARAMS)
 
-    caller_locals = getCallerLocals()
+    caller_locals = get_caller_locals()
 
     # check if this is only for import
     if only_import is None:
-        only_import = isTest() or \
-            "__name__" not in caller_locals or \
-            caller_locals["__name__"] != "__main__"
+        only_import = is_test() or "__name__" not in caller_locals or \
+                      caller_locals["__name__"] != "__main__"
 
     # important: only update the PARAMS variable as
     # it is referenced in other modules. Thus the type
@@ -413,66 +321,72 @@ def getParameters(filenames=["pipeline.ini", ],
         # turn on default dictionary
         TriggeredDefaultFactory.with_default = True
 
-    # Clear up ini files on the list that do not exist.
-    # Please note the use of list(filenames) to create
-    # a clone to iterate over as we remove items from
-    # the original list (to avoid unexpected results)
-    for fn in list(filenames):
-        if not os.path.exists(fn):
-            filenames.remove(fn)
+    # check if the pipeline is in testing mode
+    found = False
+    if 'argv' in caller_locals and caller_locals['argv'] is not None:
+        for e in caller_locals['argv']:
+            if 'template_pipeline.py' in e:
+                found = True
+    PARAMS['testing'] = 'self' in caller_locals or found
 
     if site_ini:
-        # read configuration from /etc/cgat/pipeline.ini
-        fn = "/etc/cgat/pipeline.ini"
+        # read configuration from /etc/cgat/pipeline.yml
+        fn = "/etc/cgat/pipeline.yml"
         if os.path.exists(fn):
             filenames.insert(0, fn)
 
-    if user_ini:
+    if user:
         # read configuration from a users home directory
         fn = os.path.join(os.path.expanduser("~"),
-                          ".cgat")
+                          ".cgat.yml")
         if os.path.exists(fn):
-            filenames.insert(0, fn)
+            if 'pipeline.yml' in filenames:
+                index = filenames.index('pipeline.yml')
+                filenames.insert(index, fn)
+            else:
+                filenames.append(fn)
 
-    if default_ini:
-        # The link between CGATPipelines and Pipeline.py
-        # needs to severed at one point.
-        # 1. config files into CGAT module directory?
-        # 2. Pipeline.py into CGATPipelines module directory?
-        filenames.insert(0,
-                         os.path.join(CGATPIPELINES_PIPELINE_DIR,
-                                      'configuration',
-                                      'pipeline.ini'))
+    filenames = [x.strip() for x in filenames if os.path.exists(x)]
 
-    # IMS: Several legacy scripts call this with a string as input
-    # rather than a list. Check for this and correct
+    # save list of config files
+    PARAMS["pipeline_yml"] = filenames
 
-    if isinstance(filenames, str):
-        filenames = [filenames]
-
-    PARAMS['pipeline_ini'] = filenames
-
-    try:
-        CONFIG.read(filenames)
-        p = configToDictionary(CONFIG)
-    except configparser.InterpolationSyntaxError as ex:
-        # Do not log, as called before logging module is initialized -
-        # this will mess up loging configuration in Control.py and Experiment.py
-        # E.debug(
-        #     "InterpolationSyntaxError when reading configuration file, "
-        #     "likely due to use of '%'. "
-        #     "Please quote '%' if ini interpolation is required. "
-        #     "Orginal error: {}".format(str(ex)))
-        CONFIG = configparser.RawConfigParser()
-        CONFIG.read(filenames)
-        p = configToDictionary(CONFIG)
-    
     # update with hard-coded PARAMS
-    PARAMS.update(HARDCODED_PARAMS)
-
+    nested_update(PARAMS, HARDCODED_PARAMS)
     if defaults:
-        PARAMS.update(defaults)
-    PARAMS.update(p)
+        nested_update(PARAMS, defaults)
+
+    # reset working directory. Set in PARAMS to prevent repeated calls to
+    # os.getcwd() failing if network is busy
+    PARAMS["workingdir"] = os.getcwd()
+    # location of pipelines - set via location of top frame (cgatflow command)
+    if '__file__' in caller_locals:
+        PARAMS["pipelinedir"] = os.path.dirname(caller_locals["__file__"])
+    else:
+        PARAMS["pipelinedir"] = 'unknown'
+
+    for filename in filenames:
+        if not os.path.exists(filename):
+            continue
+        get_logger().info("reading config from file {}".format(
+            filename))
+
+        with open(filename) as inf:
+            p = yaml.load(inf)
+            if p:
+                nested_update(PARAMS, p)
+
+    # for backwards compatibility - normalize dictionaries
+    p = {}
+    for k, v in PARAMS.items():
+        if isinstance(v, collections.Mapping):
+            for kk, vv in v.items():
+                new_key = "{}_{}".format(k, kk)
+                if new_key in p:
+                    raise ValueError(
+                        "key {} does already exist".format(new_key))
+                p[new_key] = vv
+    nested_update(PARAMS, p)
 
     # interpolate some params with other parameters
     for param in INTERPOLATE_PARAMS:
@@ -482,53 +396,17 @@ def getParameters(filenames=["pipeline.ini", ],
             raise TypeError('could not interpolate %s: %s' %
                             (PARAMS[param], msg))
 
-    # expand pathnames
+    # expand directory pathnames
     for param, value in list(PARAMS.items()):
-        if param.endswith("dir"):
-            if value.startswith("."):
-                PARAMS[param] = os.path.abspath(value)
+        if (param.endswith("dir") and isinstance(value, str) and value.startswith(".")):
+            PARAMS[param] = os.path.abspath(value)
 
     # make sure that the dictionary reference has not changed
     assert id(PARAMS) == old_id
-
     return PARAMS
 
 
-def loadParameters(filenames):
-    '''load parameters from one or more files.
-
-    Parameters are processed in the same way as :func:`getParameters`,
-    but the global parameter dictionary is not updated.
-
-    Arguments
-    ---------
-    filenames : list
-       List of filenames of the configuration files to read.
-
-    Returns
-    -------
-    config : dict
-       A configuration dictionary.
-
-    '''
-    try:
-        config = configparser.SafeConfigParser()
-        config.read(filenames)
-        p = configToDictionary(config)
-    except configparser.InterpolationSyntaxError as ex:
-        E.warn(
-            "InterpolationSyntaxError when reading configuration file, "
-            "likely due to use of '%'. "
-            "Please quote '%' if ini interpolation is required. "
-            "Orginal error: {}".format(str(ex)))
-        config = configparser.RawConfigParser()
-        config.read(filenames)
-        p = configToDictionary(config)
-
-    return p
-
-
-def matchParameter(param):
+def match_parameter(param):
     '''find an exact match or prefix-match in the global
     configuration dictionary param.
 
@@ -560,7 +438,7 @@ def matchParameter(param):
                    param)
 
 
-def substituteParameters(**kwargs):
+def substitute_parameters(**kwargs):
     '''return a parameter dictionary.
 
     This method builds a dictionary of parameter values to
@@ -582,7 +460,7 @@ def substituteParameters(**kwargs):
                   "tophat_cutoff": 0.5,
                   "sample1.bam.gz_tophat_threads" : 6}
         outfile = "sample1.bam.gz"
-        print substituteParameters(**locals())
+        print(substitute_parameters(**locals()))
         {"tophat_cutoff": 0.5, "tophat_threads": 6}
 
     Returns
@@ -599,22 +477,22 @@ def substituteParameters(**kwargs):
     if "outfile" in local_params:
         # replace specific parameters with task (outfile) specific parameters
         outfile = local_params["outfile"]
-        for k in list(local_params.keys()):
+        keys = list(local_params.keys())
+        for k in keys:
             if k.startswith(outfile):
                 p = k[len(outfile) + 1:]
                 if p not in local_params:
-                    raise KeyError(
-                        "task specific parameter '%s' "
-                        "does not exist for '%s' " % (p, k))
-                E.debug("substituting task specific parameter "
-                        "for %s: %s = %s" %
-                        (outfile, p, local_params[k]))
+                    # do not raise error, argument might be a prefix
+                    continue
+                get_logger.debug("substituting task specific parameter "
+                                 "for %s: %s = %s" %
+                                 (outfile, p, local_params[k]))
                 local_params[p] = local_params[k]
 
     return local_params
 
 
-def asList(value):
+def as_list(value):
     '''return a value as a list.
 
     If the value is a string and contains a ``,``, the string will
@@ -637,7 +515,7 @@ def asList(value):
         return [value]
 
 
-def isTrue(param, **kwargs):
+def is_true(param, **kwargs):
     '''return True if param has a True value.
 
     A parameter is False if it is:
@@ -655,7 +533,7 @@ def isTrue(param, **kwargs):
         Parameter to be tested
     kwargs : dict
         Dictionary of local configuration values. These will be passed
-        to :func:`substituteParameters` before evaluating `param`
+        to :func:`substitute_parameters` before evaluating `param`
 
     Returns
     -------
@@ -663,19 +541,48 @@ def isTrue(param, **kwargs):
 
     '''
     if kwargs:
-        p = substituteParameters(**kwargs)
+        p = substitute_parameters(**kwargs)
     else:
         p = PARAMS
     value = p.get(param, 0)
     return value not in (0, '', 'false', 'False')
 
 
-def checkParameter(param):
+def check_parameter(param):
     """check if parameter ``key`` is set"""
     if param not in PARAMS:
         raise ValueError("need `%s` to be set" % param)
 
 
-def getParams():
+# WIP: how to find the right pipeline
+# 1. caller locals()
+# 2. explicitely (with pipeline name)
+def initialize(*args, **kwargs):
+    """initialize the CGATFlow pipeline"""
+    return get_parameters(
+        ["%s/pipeline.yml" % os.path.splitext(__file__)[0],
+         "../pipeline.yml",
+         "pipeline.yml"])
+
+
+def get_params():
     """return handle to global parameter dictionary"""
     return PARAMS
+
+
+def get_parameters_as_namedtuple(*args, **kwargs):
+    """return PARAM dictionary as a namedtuple.
+    """
+    d = get_parameters(*args, **kwargs)
+    return collections.namedtuple('GenericDict', list(d.keys()))(**d)
+
+
+def get_param_section(section):
+    """return config values in section
+
+    Sections are built by common prefixes.
+    """
+    if not section.endswith("_"):
+        section = section + "_"
+    n = len(section)
+    return [(x[n:], y) for x, y in PARAMS.items() if x.startswith(section)]
